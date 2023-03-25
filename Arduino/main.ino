@@ -33,6 +33,10 @@ unsigned long trial_start_time_ = 0;
 int incoming_byte_              = 0;
 bool reboot_                    = false;
 
+long randNumber;
+int tone_freq = 0;     //background tone
+int dev_freq = 15000;      //deviant/edge tone
+
 // NOTE: Should be big enough to hold the state. 10 char long is ok.
 // NOTE: ProtoUSValue should be more than 10 character long.
 char trial_state_[11]            = "PRE_";
@@ -151,6 +155,19 @@ void play_tone( unsigned long period, double duty_cycle = 0.5 )
     noTone( TONE_PIN );
 }
 
+void play_oddballtone( unsigned long period, double freq )
+{
+    reset_watchdog( );
+    check_for_reset( );
+    unsigned long toneStart = millis();
+    while( (millis() - toneStart) <= period )
+    {
+        write_data_line();
+        tone( TONE_PIN, freq );
+    }
+    noTone( TONE_PIN );
+}
+
 
 /**
  * @brief Play puff for given duration.
@@ -193,7 +210,9 @@ void deliverShock( int duration )
     enableInputToStimIsolator();
     stamp_ = millis();
     while( (millis() - stamp_) < duration)
+    {
         write_data_line();
+    }
     disableInputToStimIsolator();
 }
 
@@ -545,39 +564,146 @@ void do_trial( size_t trial_num, bool isprobe = false )
     }
 }
 
+void do_oddballtrial(size_t trial_num)
+{
+    reset_watchdog( );
+    check_for_reset( );
+
+    print_trial_info( );
+    trial_start_time_ = millis( );
+
+    /*-----------------------------------------------------------------------------
+     * PRE. Start imaging;
+     * Usually durations of PRE_ is 8000 ms. For some trials is it randomly
+     * chosen between 6000 ms and 8000 ms. See protocol.h file and
+     * ./Protocols/BehaviourProtocols.xlsx file.
+     *-----------------------------------------------------------------------------*/
+    size_t duration = random(PROTO_PreStimDuration_LOW, PROTO_PreStimDuration_HIGH+1);
+
+    // From Ananth. He suggested that 60ms delay is required for every protocol. This is
+    // apprently shutter delay for the camera and only required for trial number
+    // 1.
+    if (trial_num > 0)
+        delay(60); // Shutter delay.
+
+    stamp_ = millis( );
+
+    sprintf(trial_state_, "PRE_" );
+    digitalWrite(IMAGING_TRIGGER_PIN, HIGH);   // Imaging START
+    digitalWrite(CAMERA_TTL_PIN, LOW );        // Camera STOP.
+    digitalWrite(LED_PIN, LOW );               // LED STOP.
+
+    while( (millis( ) - trial_start_time_ ) <= duration ) /* PRE_ time */
+    {
+        // 500 ms before the PRE_ ends, start camera pin high. We start
+        // recording as well.
+        if( (millis( ) - stamp_) >= (duration - 500 ) )
+        {
+            if( LOW == digitalRead( CAMERA_TTL_PIN ) )
+            {
+                digitalWrite( CAMERA_TTL_PIN, HIGH );
+            }
+        }
+
+        write_data_line( );
+    }
+    stamp_ = millis( );
+
+    /*-----------------------------------------------------------------------------
+     *  Oddball protocol
+     *-----------------------------------------------------------------------------*/
+    randNumber = random(30,80);
+    for (int i=0; i<randNumber; i++) {
+      play_oddballtone(50, tone_freq);
+      delay(150);
+    }
+    play_oddballtone(50, dev_freq);
+    delay(150);
+    randNumber = random(30,80);
+    for (int i=0; i<randNumber; i++) {
+      play_oddballtone(50, tone_freq);
+      delay(150);
+    }
+    
+
+    /*-----------------------------------------------------------------------------
+     *  POST, flexible duration till trial is over. It is 8 second long.
+     *-----------------------------------------------------------------------------*/
+    // Last phase is post. If we are here just spend rest of time here.
+    duration = PROTO_PostStimDuration;
+    while( (millis( ) - stamp_) <= duration )
+    {
+        write_data_line( );
+        // Switch camera OFF after 2500 ms into POST.
+        if( (millis() - stamp_) >= 2500 )
+            digitalWrite( CAMERA_TTL_PIN, LOW );
+    }
+
+    digitalWrite( IMAGING_TRIGGER_PIN, LOW ); /* Shut down the imaging. */
+
+    /*-----------------------------------------------------------------------------
+     *  ITI.
+     *-----------------------------------------------------------------------------*/
+    unsigned long rduration = random(23000, 25001);
+    Serial.print(">>Trial is over. Waiting "); 
+    Serial.print(rduration - stamp_);
+    Serial.println(" ms (ITI) before starting new trial." );
+    stamp_ = millis();
+    sprintf(trial_state_, "ITI_");
+    while((millis() - stamp_) <= rduration)
+    {
+        reset_watchdog();
+        write_data_line();
+        delay(200);
+    }
+}
+
 void loop()
 {
     reset_watchdog();
 
-    // Initialize probe trials index. Mean 6 +/- 2 trials.
-    unsigned numProbeTrials = 0;
-    unsigned nextProbeTrialIndex = random(5, 10);
-
-    for (size_t i = 1; i <= PROTO_NumTrialsInABlock; i++)
+    if(String("Oddball") == String(PROTO_CODE))
     {
-        check_for_reset();
-        reset_watchdog();
-        trial_count_ = i;
-
-        if(String("TONE/LIGHT") == String(PROTO_CSValue))
+        for (size_t i = 1; i <= PROTO_NumTrialsInABlock; i++)
         {
-            // FOR Shomu. Mixed trials.
-            bool isprobe = false;
-            if( i % 5 == 0 )
-                isprobe = true;
-            do_trial(i, isprobe );
+            check_for_reset();
+            reset_watchdog();
+            trial_count_ = i;
+            do_oddballtrial(i);
         }
-        else
+    }
+    else
+    {
+        // Initialize probe trials index. Mean 6 +/- 2 trials.
+        unsigned numProbeTrials = 0;
+        unsigned nextProbeTrialIndex = random(5, 10);
+
+        for (size_t i = 1; i <= PROTO_NumTrialsInABlock; i++)
         {
-            bool isprobe = false;
-            // Probe trial.
-            if( i == nextProbeTrialIndex )
+            check_for_reset();
+            reset_watchdog();
+            trial_count_ = i;
+
+            if(String("TONE/LIGHT") == String(PROTO_CSValue))
             {
-                isprobe = true;
-                numProbeTrials +=1 ;
-                nextProbeTrialIndex = random( (numProbeTrials+1)*10-2, (numProbeTrials+1)*10+3);
+                // FOR Shomu. Mixed trials.
+                bool isprobe = false;
+                if( i % 5 == 0 )
+                    isprobe = true;
+                do_trial(i, isprobe );
             }
-            do_trial(i, isprobe);
+            else
+            {
+                bool isprobe = false;
+                // Probe trial.
+                if( i == nextProbeTrialIndex )
+                {
+                    isprobe = true;
+                    numProbeTrials +=1 ;
+                    nextProbeTrialIndex = random( (numProbeTrials+1)*10-2, (numProbeTrials+1)*10+3);
+                }
+                do_trial(i, isprobe);
+            }
         }
     }
 
